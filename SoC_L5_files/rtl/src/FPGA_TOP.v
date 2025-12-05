@@ -74,7 +74,6 @@ module FPGA_TOP #(
         .in(BUTTONS[0]),
         .out(button_parsed)
     );
-    
     assign reset_button = button_parsed[0];
     
     wire cpu_tx, cpu_rx;
@@ -90,7 +89,6 @@ module FPGA_TOP #(
         .FPGA_SERIAL_RX(cpu_rx),
         .FPGA_SERIAL_TX(cpu_tx),
         .TEST_BIOS(1'b0),
-        
         .EXT_DIN(EXT_DIN),
         .EXT_WEA(EXT_WEA),
         .EXT_EN(EXT_EN),
@@ -99,7 +97,6 @@ module FPGA_TOP #(
     );
     
     reg [3:0] reg_led;
-    
     always @(posedge cpu_clk_g or posedge reset_button) begin
         if(reset_button) begin
             reg_led <= 4'd0;
@@ -111,35 +108,28 @@ module FPGA_TOP #(
             reg_led[3]   <= EXT_DIN[3];
         end
     end
-    
     assign LEDS = reg_led;
     
     PipeReg #(16) FF_EXT_ADDR (.CLK(cpu_clk_g), .RST(reset), .EN(1'b1), .D(EXT_ADDR), .Q(EXT_ADDR_FF));
     
     // =========================================================================
-    // [수정됨] Convolution Accelerator 연결 로직
+    // [최종 수정] 가속기 연결 (주소 복구: 10'd4가 맞습니다!)
     // =========================================================================
     
-    // 1. 가속기 신호 선언
     wire [5:0]  conv_addr;
     wire        acc_en;
     wire        acc_we;
     wire [31:0] acc_dout;
 
-    // 2. 주소 디코딩 및 변환 (수정됨!)
-    // C 코드 #define ACC_BASE_ADDR 0x80010400 와 일치시킴.
-    // Offset 0x400 (Byte) -> Decimal 1024
-    // 1024 / 64 (페이지 크기) = 16 (10'd16)
-    assign acc_en = EXT_EN && (EXT_ADDR[15:6] == 10'd16); 
+    // Word Address 0x100 (Byte 0x400) -> EXT_ADDR == 0x100 -> 상위비트 4
+    assign acc_en = EXT_EN && (EXT_ADDR[15:6] == 10'd4); 
     
-    // Byte Addressing을 Word Addressing으로 변환
-    // C에서 0x40 -> Verilog 0x10 (16)
-    // 따라서 EXT_ADDR의 하위 비트 [7:2]를 사용해야 함 (나누기 4)
-    assign conv_addr = EXT_ADDR[7:2]; 
+    // 주소 하위 6비트 그대로 사용
+    assign conv_addr = EXT_ADDR[5:0]; 
     
     assign acc_we = EXT_WEA[0];
 
-    // 3. 모듈 인스턴스화
+    // 모듈 인스턴스화
     convolution_acc u_conv_acc (
         .clk    (cpu_clk_g),
         .rst    (reset),
@@ -150,12 +140,11 @@ module FPGA_TOP #(
         .dout   (acc_dout)
     );
 
-    // 4. Read Data MUX 수정 (수정됨!)
-    // acc_en 조건과 동일하게 ADDR_FF의 상위 비트가 16일 때 가속기 데이터를 선택
+    // Read MUX (10'd4 확인)
     assign EXT_DOUT =   (EXT_ADDR_FF == 16'd0) ? LEDS :
                         (EXT_ADDR_FF == 16'd1) ? SWITCHES :
                         (EXT_ADDR_FF == 16'd2) ? BUTTONS :
-                        (EXT_ADDR_FF[15:6] == 10'd16) ? acc_dout : // [수정] 10'd4 -> 10'd16 (0x400 대응)
+                        (EXT_ADDR_FF[15:6] == 10'd4) ? acc_dout : // 0x400 영역
                         32'd0;
 
     // =========================================================================
