@@ -105,7 +105,7 @@ module convolution_acc (
     // =================================================================
     // 4. 레지스터 읽기 동작
     // =================================================================
-    always @(posedge clk or posedge rst) begin
+    always @(*) begin
         if (rst) begin
             dout <= 32'd0;
         end
