@@ -25,6 +25,47 @@
 // =================================================================
 int main(void)
 {
+ // ========================================================
+// 주소 스캐너: FPGA가 응답하는 진짜 주소를 찾습니다.
+// main() 함수 시작 부분에 넣어주세요.
+// ========================================================
+uwrite_int8s("Scanning for Accelerator Address...\r\n");
+
+// 0x80000000 부터 0x80020000 까지 0x100 단위로 뒤집니다.
+for (uint32_t addr = 0x80000000; addr < 0x80020000; addr += 0x100) {
+    
+    // 1. 제어 레지스터(Offset 0)에 0을 써서 초기화 시도 (Safe check)
+    *(volatile uint32_t *)(addr) = 0; 
+    
+    // 2. 상태 레지스터(Offset 4) 읽기
+    // 가속기가 없는 주소는 보통 0을 리턴합니다.
+    // 하지만 가속기 상태 레지스터의 기본값은? (Reset 직후 Done=0, Busy=0 -> 0)
+    
+    // 3. 테스트: Start 신호를 줘봅니다. (Offset 0에 1 쓰기)
+    *(volatile uint32_t *)(addr) = 1;
+    
+    // 4. 상태 확인 (Busy나 Done이 바뀌는지?)
+    // Verilog 로직상 Start(1) -> Busy(1) -> Done(1) 순서로 바뀝니다.
+    // 아주 잠깐 기다렸다가 상태를 읽어봅니다.
+    for(volatile int d=0; d<100; d++); // 딜레이
+    
+    uint32_t status = *(volatile uint32_t *)(addr + 4);
+    
+    // 만약 상태값이 0이 아니라면 (Done=2 또는 Busy=1), 여기가 가속기입니다!
+    if (status != 0) {
+        uwrite_int8s("FOUND Accelerator at: ");
+        int8_t buf[32];
+        uint32_to_ascii_hex(addr, buf, 32);
+        uwrite_int8s(buf);
+        uwrite_int8s("\r\n");
+    }
+}
+uwrite_int8s("Scan Finished.\r\n");
+// ========================================================
+    
+    
+    
+    
     // 결과 출력을 위한 버퍼
     int8_t buffer[BUF_LEN];
 
