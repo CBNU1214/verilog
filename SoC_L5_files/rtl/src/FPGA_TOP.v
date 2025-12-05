@@ -1,158 +1,145 @@
-`timescale 1ns/10ps
-
-module FPGA_TOP #(
-    parameter SYSTEM_CLOCK_FREQ = 100_000_000,
-    parameter BAUD_RATE = 115200,
-    parameter CPU_CLOCK_FREQ = 50_000_000,
-    parameter integer B_SAMPLE_COUNT_MAX = 0.0005 * CPU_CLOCK_FREQ,
-    parameter integer B_PULSE_COUNT_MAX = 0.100 / 0.0005,
-    parameter RESET_PC = 32'h4000_0000
-) (
-    input wire CLK100MHZ,
-    input wire [3:0] BUTTONS,
-    input wire [3:0] SWITCHES,
-    output wire [3:0] LEDS,
-    input wire usb_uart_rxd,
-    output wire usb_uart_txd
+module convolution_acc (
+    input wire          clk,
+    input wire          rst,
+    input wire [5:0]    addr,   // Word Address (0x00, 0x01, 0x10...)
+    input wire          en,     // enable 신호
+    input wire          we,     // 1이면 쓰기 0이면 읽기
+    input wire [31:0]   din,    // CPU -> Accelerator
+    output reg [31:0]   dout    // Accelerator -> CPU
 );
 
-    wire FPGA_SERIAL_RX;
-    wire FPGA_SERIAL_TX;
-    assign FPGA_SERIAL_RX = usb_uart_rxd;
-    assign usb_uart_txd = FPGA_SERIAL_TX;
+    // =================================================================
+    // 1. 레지스터 정의
+    // =================================================================
+    reg [31:0] kernel [0:8];    // 커널 가중치
+    reg [31:0] window [0:8];    // 윈도우 데이터
+    reg [31:0] result;          // 결과 값
     
-    wire [31:0] EXT_DIN;
-    wire [3:0] EXT_WEA;
-    wire EXT_EN;
-    wire [15:0] EXT_ADDR;
-    wire [15:0] EXT_ADDR_FF;
-    wire [31:0] EXT_DOUT;
-    
-    wire clk;
-    assign clk = CLK100MHZ;
+    reg start_reg;              // Start (Bit 0)
+    reg done_reg;               // Done (Bit 1)
+    reg busy_reg;               // Busy (Bit 0 of Status)
 
-    wire cpu_clk, cpu_clk_g, cpu_clk_pll_lock;
-    wire cpu_clk_pll_fb_out, cpu_clk_pll_fb_in;
-    
-    BUFG  cpu_clk_buf     (.I(cpu_clk),               .O(cpu_clk_g));
-    BUFG  cpu_clk_f_buf   (.I(cpu_clk_pll_fb_out),    .O (cpu_clk_pll_fb_in));
+    integer i;
 
-    /* verilator lint_off PINMISSING */
-    PLLE2_ADV #(
-        .BANDWIDTH            ("OPTIMIZED"),
-        .COMPENSATION         ("BUF_IN"),
-        .STARTUP_WAIT         ("FALSE"),
-        .DIVCLK_DIVIDE        (4),
-        .CLKFBOUT_MULT        (34),
-        .CLKFBOUT_PHASE       (0.000),
-        .CLKOUT0_DIVIDE       (17),
-        .CLKOUT0_PHASE        (0.000),
-        .CLKOUT0_DUTY_CYCLE   (0.500),
-        .CLKIN1_PERIOD        (10.000)
-    ) plle2_cpu_inst (
-        .CLKFBOUT            (cpu_clk_pll_fb_out),
-        .CLKOUT0             (cpu_clk),
-        .CLKFBIN             (cpu_clk_pll_fb_in),
-        .CLKIN1              (clk),
-        .CLKIN2              (1'b0),
-        .CLKINSEL            (1'b1),
-        .LOCKED              (cpu_clk_pll_lock),
-        .PWRDWN              (1'b0),
-        .RST                 (1'b0)
-    );
+    // =================================================================
+    // 2. Convolution 연산 로직
+    // =================================================================
+    wire signed [31:0] mult_res [0:8];
+    wire signed [31:0] sum_res;
 
-    wire [3:0] button_parsed;
-    wire reset_button, reset;
-    assign reset = reset_button|| ~cpu_clk_pll_lock;
-
-    button_parser #(
-        .width(4),
-        .sample_count_max(B_SAMPLE_COUNT_MAX),
-        .pulse_count_max(B_PULSE_COUNT_MAX)
-    ) b_parser (
-        .clk(cpu_clk_g),
-        .in(BUTTONS[0]),
-        .out(button_parsed)
-    );
-    assign reset_button = button_parsed[0];
-    
-    wire cpu_tx, cpu_rx;
-
-    RVCORE_TOP #(
-        .CPU_CLOCK_FREQ(CPU_CLOCK_FREQ),
-        .RESET_PC(RESET_PC),
-        .BAUD_RATE(BAUD_RATE),
-        .AWIDTH(16)
-    ) cpu (
-        .clk(cpu_clk_g),
-        .rst(reset),
-        .FPGA_SERIAL_RX(cpu_rx),
-        .FPGA_SERIAL_TX(cpu_tx),
-        .TEST_BIOS(1'b0),
-        .EXT_DIN(EXT_DIN),
-        .EXT_WEA(EXT_WEA),
-        .EXT_EN(EXT_EN),
-        .EXT_ADDR(EXT_ADDR),
-        .EXT_DOUT(EXT_DOUT) 
-    );
-    
-    reg [3:0] reg_led;
-    always @(posedge cpu_clk_g or posedge reset_button) begin
-        if(reset_button) begin
-            reg_led <= 4'd0;
+    genvar j;
+    generate
+        for (j = 0; j < 9; j = j + 1) begin : MAC_UNIT
+            assign mult_res[j] = $signed(window[j]) * $signed(kernel[j]);
         end
-        else if(EXT_EN & EXT_WEA[0] & (EXT_ADDR == 16'd0)) begin
-            reg_led[0]   <= EXT_DIN[0];
-            reg_led[1]   <= EXT_DIN[1];
-            reg_led[2]   <= EXT_DIN[2]; 
-            reg_led[3]   <= EXT_DIN[3];
+    endgenerate
+
+    assign sum_res = mult_res[0] + mult_res[1] + mult_res[2] +
+                     mult_res[3] + mult_res[4] + mult_res[5] +
+                     mult_res[6] + mult_res[7] + mult_res[8];
+
+    // =================================================================
+    // 3. 레지스터 쓰기 및 제어 (수정됨)
+    // =================================================================
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            start_reg <= 1'b0;
+            busy_reg  <= 1'b0;
+            done_reg  <= 1'b0;
+            result    <= 32'd0;
+            for (i=0; i<9; i=i+1) begin
+                kernel[i] <= 32'd0;
+                window[i] <= 32'd0;
+            end
+        end
+        else begin
+            // 1. Start 신호 Self-clearing (기본적으로 0으로 돌아감)
+            start_reg <= 1'b0;
+
+            // 2. CPU 쓰기 동작
+            if (en && we) begin
+                case (addr)
+                    // Control Reg (Addr 0x00)
+                    6'h00: begin
+                        // CPU가 1을 쓰면 start_reg를 1로 설정 (다음 클럭에 다시 0이 됨)
+                        if (din[0]) start_reg <= 1'b1;
+                    end
+                    
+                    // Kernel Values (Addr 0x10 ~ 0x18)
+                    6'h10: kernel[0] <= din;
+                    6'h11: kernel[1] <= din;
+                    6'h12: kernel[2] <= din;
+                    6'h13: kernel[3] <= din;
+                    6'h14: kernel[4] <= din;
+                    6'h15: kernel[5] <= din;
+                    6'h16: kernel[6] <= din;
+                    6'h17: kernel[7] <= din;
+                    6'h18: kernel[8] <= din;
+
+                    // Window Values (Addr 0x20 ~ 0x28)
+                    6'h20: window[0] <= din;
+                    6'h21: window[1] <= din;
+                    6'h22: window[2] <= din;
+                    6'h23: window[3] <= din;
+                    6'h24: window[4] <= din;
+                    6'h25: window[5] <= din;
+                    6'h26: window[6] <= din;
+                    6'h27: window[7] <= din;
+                    6'h28: window[8] <= din;
+                endcase
+            end
+
+            // 3. 상태 머신 (연산 제어)
+            if (start_reg) begin
+                busy_reg <= 1'b1;
+                done_reg <= 1'b0;
+            end
+            else if (busy_reg) begin
+                result   <= sum_res; // 연산 결과 저장
+                busy_reg <= 1'b0;    // Busy 해제
+                done_reg <= 1'b1;    // Done 설정
+            end
         end
     end
-    assign LEDS = reg_led;
-    
-    PipeReg #(16) FF_EXT_ADDR (.CLK(cpu_clk_g), .RST(reset), .EN(1'b1), .D(EXT_ADDR), .Q(EXT_ADDR_FF));
-    
-    
-    wire [5:0]  conv_addr;
-    wire        acc_en;
-    wire        acc_we;
-    wire [31:0] acc_dout;
 
-    // Word Address 0x100 (Byte 0x400) -> EXT_ADDR == 0x100 -> 상위비트 4
-    assign acc_en = EXT_EN && (EXT_ADDR[15:6] == 10'd4); 
-    
-    // 주소 하위 6비트 그대로 사용
-    assign conv_addr = EXT_ADDR[5:0]; 
-    
-    assign acc_we = EXT_WEA[0];
+    // =================================================================
+    // 4. 레지스터 읽기 동작
+    // =================================================================
+    always @(*) begin
+        if (rst) begin
+            dout <= 32'd0;
+        end
+        else begin
+            dout <= 32'd0; // 기본값
+            if (en && !we) begin
+                case (addr)
+                    6'h00: dout <= {31'd0, start_reg};
+                    6'h01: dout <= {30'd0, done_reg, busy_reg}; // Status
+                    6'h02: dout <= result;
+                    
+                    6'h10: dout <= kernel[0];
+                    6'h11: dout <= kernel[1];
+                    6'h12: dout <= kernel[2];
+                    6'h13: dout <= kernel[3];
+                    6'h14: dout <= kernel[4];
+                    6'h15: dout <= kernel[5];
+                    6'h16: dout <= kernel[6];
+                    6'h17: dout <= kernel[7];
+                    6'h18: dout <= kernel[8];
 
-    // 모듈 인스턴스화
-    convolution_acc u_conv_acc (
-        .clk    (cpu_clk_g),
-        .rst    (reset),
-        .addr   (conv_addr),
-        .en     (acc_en),
-        .we     (acc_we),
-        .din    (EXT_DIN),
-        .dout   (acc_dout)
-    );
-
-    // Read MUX (10'd4 확인)
-    assign EXT_DOUT =   (EXT_ADDR[15:6] == 10'd4) ? acc_dout : // 0x400 영역
-                        (EXT_ADDR_FF == 16'd0) ? LEDS :
-                        (EXT_ADDR_FF == 16'd1) ? SWITCHES :
-                        (EXT_ADDR_FF == 16'd2) ? BUTTONS :
-                        32'd0;
-
-    // =========================================================================
-    
-    (* IOB = "true" *) reg fpga_serial_tx_iob;
-    (* IOB = "true" *) reg fpga_serial_rx_iob;
-    assign FPGA_SERIAL_TX = fpga_serial_tx_iob;
-    assign cpu_rx = fpga_serial_rx_iob;
-    always @(posedge cpu_clk_g) begin
-        fpga_serial_tx_iob <= cpu_tx;
-        fpga_serial_rx_iob <= FPGA_SERIAL_RX;
+                    6'h20: dout <= window[0];
+                    6'h21: dout <= window[1];
+                    6'h22: dout <= window[2];
+                    6'h23: dout <= window[3];
+                    6'h24: dout <= window[4];
+                    6'h25: dout <= window[5];
+                    6'h26: dout <= window[6];
+                    6'h27: dout <= window[7];
+                    6'h28: dout <= window[8];
+                    default: dout <= 32'd0;
+                endcase
+            end
+        end
     end
-   
+
 endmodule
