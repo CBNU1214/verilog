@@ -3,13 +3,9 @@
 module FPGA_TOP #(
     parameter SYSTEM_CLOCK_FREQ = 100_000_000,
     parameter BAUD_RATE = 115200,
-    // Warning: changing the CPU_CLOCK_FREQ parameter doesn't actually change the clock frequency coming out of the PLL
     parameter CPU_CLOCK_FREQ = 50_000_000,
-    // Sample the button signal every 500us
     parameter integer B_SAMPLE_COUNT_MAX = 0.0005 * CPU_CLOCK_FREQ,
-    // The button is considered 'pressed' after 100ms of continuous pressing
     parameter integer B_PULSE_COUNT_MAX = 0.100 / 0.0005,
-    // The PC the RISC-V CPU should start at after reset
     parameter RESET_PC = 32'h4000_0000
 ) (
     input wire CLK100MHZ,
@@ -44,7 +40,7 @@ module FPGA_TOP #(
     /* verilator lint_off PINMISSING */
     PLLE2_ADV #(
         .BANDWIDTH            ("OPTIMIZED"),
-        .COMPENSATION         ("BUF_IN"),  // Not "ZHOLD"
+        .COMPENSATION         ("BUF_IN"),
         .STARTUP_WAIT         ("FALSE"),
         .DIVCLK_DIVIDE        (4),
         .CLKFBOUT_MULT        (34),
@@ -56,20 +52,14 @@ module FPGA_TOP #(
     ) plle2_cpu_inst (
         .CLKFBOUT            (cpu_clk_pll_fb_out),
         .CLKOUT0             (cpu_clk),
-        // Input clock control
         .CLKFBIN             (cpu_clk_pll_fb_in),
         .CLKIN1              (clk),
         .CLKIN2              (1'b0),
-        // Tied to always select the primary input clock
         .CLKINSEL            (1'b1),
-        // Other control and status signals
         .LOCKED              (cpu_clk_pll_lock),
         .PWRDWN              (1'b0),
         .RST                 (1'b0)
     );
-
-    // The global system reset is asserted when the RESET button is
-    // pressed by the user or when the PLL isn't locked
 
     wire [3:0] button_parsed;
     wire reset_button, reset;
@@ -108,7 +98,6 @@ module FPGA_TOP #(
         .EXT_DOUT(EXT_DOUT) 
     );
     
-    
     reg [3:0] reg_led;
     
     always @(posedge cpu_clk_g or posedge reset_button) begin
@@ -127,12 +116,44 @@ module FPGA_TOP #(
     
     PipeReg #(16) FF_EXT_ADDR (.CLK(cpu_clk_g), .RST(reset), .EN(1'b1), .D(EXT_ADDR), .Q(EXT_ADDR_FF));
     
+    // =========================================================================
+    // [추가] Convolution Accelerator 연결 로직
+    // =========================================================================
+    
+    // 1. 가속기 신호 선언
+    wire [5:0]  conv_addr;
+    wire        acc_en;
+    wire        acc_we;
+    wire [31:0] acc_dout;
+
+    // 2. 주소 디코딩
+    // Word Addr 0x100 (Byte Addr 0x400)에 매핑
+    // 0x100 = 1 0000 0000 (Binary) -> EXT_ADDR[15:6]이 '100'(4)가 되어야 함
+    assign conv_addr = EXT_ADDR[5:0];
+    assign acc_en = EXT_EN && (EXT_ADDR[15:6] == 10'd4);
+    assign acc_we = EXT_WEA[0];
+
+    // 3. 모듈 인스턴스화
+    convolution_acc u_conv_acc (
+        .clk    (cpu_clk_g),
+        .rst    (reset),
+        .addr   (conv_addr),
+        .en     (acc_en),
+        .we     (acc_we),
+        .din    (EXT_DIN),
+        .dout   (acc_dout)
+    );
+
+    // 4. Read Data MUX 수정
+    // CPU가 읽어갈 때 주소에 맞춰 LED, SW, BTN, 또는 가속기 데이터를 선택
     assign EXT_DOUT =   (EXT_ADDR_FF == 16'd0) ? LEDS :
                         (EXT_ADDR_FF == 16'd1) ? SWITCHES :
                         (EXT_ADDR_FF == 16'd2) ? BUTTONS :
+                        (EXT_ADDR_FF[15:6] == 10'd4) ? acc_dout : // [중요] Word Addr 0x100
                         32'd0;
-        
 
+    // =========================================================================
+    
     (* IOB = "true" *) reg fpga_serial_tx_iob;
     (* IOB = "true" *) reg fpga_serial_rx_iob;
     assign FPGA_SERIAL_TX = fpga_serial_tx_iob;
@@ -142,5 +163,4 @@ module FPGA_TOP #(
         fpga_serial_rx_iob <= FPGA_SERIAL_RX;
     end
    
-    
 endmodule
