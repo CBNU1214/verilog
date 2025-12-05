@@ -112,9 +112,6 @@ module FPGA_TOP #(
     
     PipeReg #(16) FF_EXT_ADDR (.CLK(cpu_clk_g), .RST(reset), .EN(1'b1), .D(EXT_ADDR), .Q(EXT_ADDR_FF));
     
-    // =========================================================================
-    // [최종 수정] 가속기 연결 (주소 복구: 10'd4가 맞습니다!)
-    // =========================================================================
     
     wire [5:0]  conv_addr;
     wire        acc_en;
@@ -141,10 +138,10 @@ module FPGA_TOP #(
     );
 
     // Read MUX (10'd4 확인)
-    assign EXT_DOUT =   (EXT_ADDR_FF == 16'd0) ? LEDS :
+    assign EXT_DOUT =   (EXT_ADDR[15:6] == 10'd4) ? acc_dout : // 0x400 영역
+                        (EXT_ADDR_FF == 16'd0) ? LEDS :
                         (EXT_ADDR_FF == 16'd1) ? SWITCHES :
                         (EXT_ADDR_FF == 16'd2) ? BUTTONS :
-                        (EXT_ADDR_FF[15:6] == 10'd4) ? acc_dout : // 0x400 영역
                         32'd0;
 
     // =========================================================================
