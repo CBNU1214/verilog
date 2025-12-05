@@ -8,7 +8,7 @@
 // =================================================================
 // FPGA_TOP에서 0x100(Word Address)을 할당했으므로,
 // C언어 Byte Address = 0x80010000(Base) + 0x400(Offset)
-#define ACC_BASE_ADDR       0x80010400
+#define ACC_BASE_ADDR       0x80000400
 
 // 레지스터 오프셋 (Byte 단위)
 #define ACC_REG_CTRL        0x00  // Verilog addr 0x00
